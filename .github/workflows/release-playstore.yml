@@ -1,24 +1,31 @@
 
-name: Download APK and Publish Release
+name: APK Release Automation
 
 on:
   workflow_dispatch:
     inputs:
       package:
-        description: Android package name
-        required: true
+        description: Android package name (leave empty to use PACKAGE_NAME secret)
+        required: false
         type: string
+
+  schedule:
+    - cron: "0 6 * * *"
 
 permissions:
   contents: read
 
 concurrency:
-  group: apk-release-${{ inputs.package }}
+  group: apk-release-${{ inputs.package || 'scheduled' }}
   cancel-in-progress: false
 
 jobs:
   download-and-publish:
     runs-on: ubuntu-latest
+
+    env:
+      PACKAGE: ${{ inputs.package || secrets.PACKAGE_NAME }}
+      TARGET_REPO: ${{ secrets.RELEASE_REPOSITORY }}
 
     steps:
       - name: Set Up Python
@@ -31,12 +38,15 @@ jobs:
 
       - name: Validate Configuration
         env:
-          PACKAGE: ${{ inputs.package }}
-          TARGET_REPO: ${{ secrets.RELEASE_REPOSITORY }}
-          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           GPLAYDL_API_KEY: ${{ secrets.GPLAYDL_API_KEY }}
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
           set -euo pipefail
+
+          if [[ -z "$PACKAGE" ]]; then
+            echo "Error: PACKAGE_NAME is not configured."
+            exit 1
+          fi
 
           if [[ ! "$PACKAGE" =~ ^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)+$ ]]; then
             echo "Error: Invalid Android package name."
@@ -48,7 +58,7 @@ jobs:
             exit 1
           fi
 
-          if [[ -z "$RELEASE_TOKEN" || -z "$GPLAYDL_API_KEY" ]]; then
+          if [[ -z "$GPLAYDL_API_KEY" || -z "$RELEASE_TOKEN" ]]; then
             echo "Error: Required secrets are missing."
             exit 1
           fi
@@ -56,16 +66,14 @@ jobs:
       - name: Download APK Files
         env:
           GPLAYDL_API_KEY: ${{ secrets.GPLAYDL_API_KEY }}
-          PACKAGE: ${{ inputs.package }}
         run: |
           set -euo pipefail
 
           mkdir -p apks
-
           gplaydl info "$PACKAGE"
           gplaydl download "$PACKAGE" -o ./apks
 
-          VERSION_CODE="$(python - "$PACKAGE" <<'PY'
+          VERSION_CODE=$(python - "$PACKAGE" <<'PY'
           import re
           import sys
           from pathlib import Path
@@ -75,40 +83,43 @@ jobs:
               re.escape(package) + r"-(\d+)\.apk"
           )
 
-          matches = [
-              pattern.fullmatch(path.name)
-              for path in Path("apks").glob("*.apk")
-          ]
-
-          version_codes = [
+          versions = [
               match.group(1)
-              for match in matches
-              if match is not None
+              for path in Path("apks").glob("*.apk")
+              if (match := pattern.fullmatch(path.name))
           ]
 
-          if not version_codes:
+          if not versions:
               raise SystemExit("Error: Base APK not found.")
 
-          print(max(version_codes, key=int))
+          print(max(versions, key=int))
           PY
-          )"
+          )
 
           echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
           echo "TAG=v$VERSION_CODE" >> "$GITHUB_ENV"
 
-          echo "Detected Android version code: $VERSION_CODE"
+          echo "Detected version code: $VERSION_CODE"
+
+      - name: Validate Download
+        run: |
+          set -euo pipefail
+
+          shopt -s nullglob
+          files=(apks/"$PACKAGE"-*.apk)
+
+          if [[ ${#files[@]} -eq 0 ]]; then
+            echo "Error: No APK files were downloaded."
+            exit 1
+          fi
+
+          printf 'Downloaded %s APK file(s).\n' "${#files[@]}"
 
       - name: Create or Update Release
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-          TARGET_REPO: ${{ secrets.RELEASE_REPOSITORY }}
-          PACKAGE: ${{ inputs.package }}
         run: |
           set -euo pipefail
-
-          printf -v RELEASE_NOTES \
-            'Android package: %s\nVersion code: %s' \
-            "$PACKAGE" "$VERSION_CODE"
 
           if ! gh release view "$TAG" \
             --repo "$TARGET_REPO" >/dev/null 2>&1; then
@@ -116,7 +127,8 @@ jobs:
             gh release create "$TAG" \
               --repo "$TARGET_REPO" \
               --title "$PACKAGE $TAG" \
-              --notes "$RELEASE_NOTES"
+              --notes "Android package: $PACKAGE
+          Version code: $VERSION_CODE"
           fi
 
           gh release view "$TAG" \
@@ -125,7 +137,7 @@ jobs:
             --jq '.assets[].name' |
           while IFS= read -r asset; do
             if [[ "$asset" == "$PACKAGE-"*.apk ]]; then
-              echo "Removing previous APK: $asset"
+              echo "Removing existing asset: $asset"
 
               gh release delete-asset "$TAG" "$asset" \
                 --repo "$TARGET_REPO" \
@@ -136,12 +148,9 @@ jobs:
           shopt -s nullglob
           files=(apks/"$PACKAGE"-*.apk)
 
-          if [[ ${#files[@]} -eq 0 ]]; then
-            echo "Error: No APK files were downloaded."
-            exit 1
-          fi
-
           gh release upload "$TAG" "${files[@]}" \
             --repo "$TARGET_REPO"
 
-          echo "Release published successfully: $TARGET_REPO/releases/tag/$TAG"
+          echo "Release published successfully."
+          echo "Repository: $TARGET_REPO"
+          echo "Release tag: $TAG"
