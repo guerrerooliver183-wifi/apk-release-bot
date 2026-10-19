@@ -1,0 +1,147 @@
+
+name: Download APK and Publish Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: Android package name
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apk-release-${{ inputs.package }}
+  cancel-in-progress: false
+
+jobs:
+  download-and-publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Set Up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install gplaydl
+        run: python -m pip install gplaydl
+
+      - name: Validate Configuration
+        env:
+          PACKAGE: ${{ inputs.package }}
+          TARGET_REPO: ${{ secrets.RELEASE_REPOSITORY }}
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          GPLAYDL_API_KEY: ${{ secrets.GPLAYDL_API_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$PACKAGE" =~ ^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)+$ ]]; then
+            echo "Error: Invalid Android package name."
+            exit 1
+          fi
+
+          if [[ ! "$TARGET_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            echo "Error: Invalid destination repository."
+            exit 1
+          fi
+
+          if [[ -z "$RELEASE_TOKEN" || -z "$GPLAYDL_API_KEY" ]]; then
+            echo "Error: Required secrets are missing."
+            exit 1
+          fi
+
+      - name: Download APK Files
+        env:
+          GPLAYDL_API_KEY: ${{ secrets.GPLAYDL_API_KEY }}
+          PACKAGE: ${{ inputs.package }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p apks
+
+          gplaydl info "$PACKAGE"
+          gplaydl download "$PACKAGE" -o ./apks
+
+          VERSION_CODE="$(python - "$PACKAGE" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          package = sys.argv[1]
+          pattern = re.compile(
+              re.escape(package) + r"-(\d+)\.apk"
+          )
+
+          matches = [
+              pattern.fullmatch(path.name)
+              for path in Path("apks").glob("*.apk")
+          ]
+
+          version_codes = [
+              match.group(1)
+              for match in matches
+              if match is not None
+          ]
+
+          if not version_codes:
+              raise SystemExit("Error: Base APK not found.")
+
+          print(max(version_codes, key=int))
+          PY
+          )"
+
+          echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
+          echo "TAG=v$VERSION_CODE" >> "$GITHUB_ENV"
+
+          echo "Detected Android version code: $VERSION_CODE"
+
+      - name: Create or Update Release
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          TARGET_REPO: ${{ secrets.RELEASE_REPOSITORY }}
+          PACKAGE: ${{ inputs.package }}
+        run: |
+          set -euo pipefail
+
+          printf -v RELEASE_NOTES \
+            'Android package: %s\nVersion code: %s' \
+            "$PACKAGE" "$VERSION_CODE"
+
+          if ! gh release view "$TAG" \
+            --repo "$TARGET_REPO" >/dev/null 2>&1; then
+
+            gh release create "$TAG" \
+              --repo "$TARGET_REPO" \
+              --title "$PACKAGE $TAG" \
+              --notes "$RELEASE_NOTES"
+          fi
+
+          gh release view "$TAG" \
+            --repo "$TARGET_REPO" \
+            --json assets \
+            --jq '.assets[].name' |
+          while IFS= read -r asset; do
+            if [[ "$asset" == "$PACKAGE-"*.apk ]]; then
+              echo "Removing previous APK: $asset"
+
+              gh release delete-asset "$TAG" "$asset" \
+                --repo "$TARGET_REPO" \
+                --yes
+            fi
+          done
+
+          shopt -s nullglob
+          files=(apks/"$PACKAGE"-*.apk)
+
+          if [[ ${#files[@]} -eq 0 ]]; then
+            echo "Error: No APK files were downloaded."
+            exit 1
+          fi
+
+          gh release upload "$TAG" "${files[@]}" \
+            --repo "$TARGET_REPO"
+
+          echo "Release published successfully: $TARGET_REPO/releases/tag/$TAG"
