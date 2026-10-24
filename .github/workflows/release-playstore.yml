@@ -310,7 +310,20 @@ jobs:
           download_status=${PIPESTATUS[0]}
 
           if [[ "$download_status" -ne 0 ]]; then
-            if grep -Fq "The account has not acquired" "$download_log" || grep -Fq "App not found:" "$download_log"; then
+            # Normalize whitespace and case so wrapped/multiline error messages are detected too.
+            if python - "$download_log" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          log = re.sub(r"\\s+", " ", Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace")).casefold()
+          known_unavailable = (
+              "the account has not acquired" in log
+              or "app not found:" in log
+          )
+          raise SystemExit(0 if known_unavailable else 1)
+          PY
+            then
               echo "::warning::[$SLOT_NUMBER] Skipping $package because it is not acquired by the account or is unavailable/not found."
               rm -f "$download_log"
               exit 0
