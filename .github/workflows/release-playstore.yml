@@ -207,7 +207,7 @@ jobs:
       - name: Prepare gplaydl JSON configuration
         if: steps.slot.outputs.configured == 'true'
         env:
-          GPLAYDL_API_KEY: ${{ secrets.GPLAYDL_API_KEY }}
+          GPLAYDL_JSON: ${{ secrets.GPLAYDL_JSON }}
         shell: bash
         run: |
           set -euo pipefail
@@ -217,14 +217,14 @@ jobs:
           import os
           from pathlib import Path
 
-          raw = os.environ.get("GPLAYDL_API_KEY", "").strip()
+          raw = os.environ.get("GPLAYDL_JSON", "").strip()
           if not raw:
-              raise SystemExit("GPLAYDL_API_KEY is empty.")
+              raise SystemExit("GPLAYDL_JSON is empty.")
 
           try:
               config = json.loads(raw)
           except json.JSONDecodeError as exc:
-              raise SystemExit("GPLAYDL_API_KEY must contain valid JSON.") from exc
+              raise SystemExit("GPLAYDL_JSON must contain valid JSON.") from exc
 
           if not isinstance(config, dict):
               raise SystemExit("The JSON root must be an object.")
@@ -244,7 +244,7 @@ jobs:
       - name: Download APK and publish release
         if: steps.slot.outputs.configured == 'true'
         env:
-          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          GIT_TOKEN: ${{ secrets.GIT_TOKEN }}
           SLOT_NUMBER: ${{ matrix.number }}
         shell: bash
         run: |
@@ -267,12 +267,12 @@ jobs:
             echo "::error::[$SLOT_NUMBER] Invalid repository format. Use OWNER/REPO."
             exit 1
           fi
-          if [[ -z "${RELEASE_TOKEN:-}" ]]; then
-            echo "::error::RELEASE_TOKEN is empty."
+          if [[ -z "${GIT_TOKEN:-}" ]]; then
+            echo "::error::GIT_TOKEN is empty."
             exit 1
           fi
 
-          export GH_TOKEN="$RELEASE_TOKEN"
+          export GH_TOKEN="$GIT_TOKEN"
           export GH_PROMPT_DISABLED=1
 
           ensure_repository() {
