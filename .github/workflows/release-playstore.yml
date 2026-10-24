@@ -316,7 +316,7 @@ jobs:
           import sys
           from pathlib import Path
 
-          log = re.sub(r"\\s+", " ", Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace")).casefold()
+          log = re.sub(r"\s+", " ", Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace")).casefold()
           known_unavailable = (
               "the account has not acquired" in log
               or "app not found:" in log
