@@ -305,10 +305,21 @@ jobs:
 
           outdir="apks/$SLOT_NUMBER/$package"
           mkdir -p "$outdir"
-          if ! gplaydl download "$package" -o "$outdir"; then
-            echo "::error::[$SLOT_NUMBER] Download failed for $package."
-            exit 1
+          download_log="$(mktemp)"
+          gplaydl download "$package" -o "$outdir" 2>&1 | tee "$download_log"
+          download_status=${PIPESTATUS[0]}
+
+          if [[ "$download_status" -ne 0 ]]; then
+            if grep -Fq "The account has not acquired" "$download_log" || grep -Fq "App not found:" "$download_log"; then
+              echo "::warning::[$SLOT_NUMBER] Skipping $package because it is not acquired by the account or is unavailable/not found."
+              rm -f "$download_log"
+              exit 0
+            fi
+            echo "::error::[$SLOT_NUMBER] Download failed for $package (exit code $download_status)."
+            rm -f "$download_log"
+            exit "$download_status"
           fi
+          rm -f "$download_log"
 
           version_code="$(python -c 'import re, sys; from pathlib import Path; package=sys.argv[1]; directory=Path(sys.argv[2]); pattern=re.compile(re.escape(package) + r"-(\d+)\.apk"); versions=[int(match.group(1)) for path in directory.glob("*.apk") if (match := pattern.fullmatch(path.name))]; print(max(versions) if versions else (_ for _ in ()).throw(SystemExit("Base APK version code not found.")))' "$package" "$outdir")" || {
             echo "::error::[$SLOT_NUMBER] Could not determine version code."
